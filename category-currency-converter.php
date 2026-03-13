@@ -17,9 +17,8 @@ register_activation_hook( __FILE__, 'category_currency_converter_activate' );
 register_deactivation_hook( __FILE__, 'category_currency_converter_deactivate' );
 
 function category_currency_converter( $price, $product ) {
-   $exchange_rate = get_option( 'category_currency_converter_exchange_rate', 1 );
-
-   $selected_categories = get_option( 'category_currency_converter_selected_categories', array() );
+   $currency_by_category = category_currency_converter_get_currency_categories();
+   $exchange_rates = get_option( 'category_currency_converter_exchange_rates', array() );
 
    if ( $product->is_type( 'variation' ) ) {
        $product_id = $product->get_parent_id();
@@ -32,16 +31,26 @@ function category_currency_converter( $price, $product ) {
        return $price;
    }
 
-   $should_convert = false;
-   foreach ( $product_categories as $category_id ) {
-       if ( in_array( absint( $category_id ), $selected_categories, true ) ) {
-           $should_convert = true;
-           break;
-       }
+   $product_currency = '';
+
+   foreach ( array( 'USD', 'EUR', 'GBP' ) as $currency ) {
+      if ( empty( $currency_by_category[ $currency ] ) || ! is_array( $currency_by_category[ $currency ] ) ) {
+         continue;
+      }
+
+      foreach ( $product_categories as $category_id ) {
+         if ( in_array( absint( $category_id ), $currency_by_category[ $currency ], true ) ) {
+            $product_currency = $currency;
+            break 2;
+         }
+      }
    }
 
-   if ( $should_convert && is_numeric( $price ) ) {
-       $price = round(floatval($price) * floatval($exchange_rate), 2);
+   if ( '' !== $product_currency && is_numeric( $price ) ) {
+      $exchange_rate = isset( $exchange_rates[ $product_currency ] ) ? floatval( $exchange_rates[ $product_currency ] ) : 1;
+      if ( $exchange_rate > 0 ) {
+         $price = round( floatval( $price ) * $exchange_rate, 2 );
+      }
    }
 
    return $price;
@@ -101,7 +110,7 @@ function category_currency_converter_settings_page() {
             <?php
             settings_fields( 'category_currency_converter_settings_group' );
             do_settings_sections( 'category_currency_converter_settings_group' );
-            $selected_categories = get_option( 'category_currency_converter_selected_categories', array() );
+            $currency_categories = category_currency_converter_get_currency_categories();
             $categories = get_terms( 'product_cat', array( 'hide_empty' => false ) );
             ?>
             <h2><?php _e( 'Select Categories', 'category-currency-converter' ); ?></h2>
@@ -109,7 +118,7 @@ function category_currency_converter_settings_page() {
                <?php if ( ! is_wp_error( $categories ) ) : ?>
                <?php foreach ( $categories as $category ) : ?>
                <li>
-               <input type="checkbox" name="category_currency_converter_selected_categories[]" value="<?php echo esc_attr( $category->term_id ); ?>" <?php checked( in_array( absint( $category->term_id ), $selected_categories, true ) ); ?>>
+               <input type="checkbox" class="ccc-category-checkbox" value="<?php echo esc_attr( $category->term_id ); ?>">
                <?php echo esc_html( $category->name ); ?>
                </li>
                <?php endforeach; ?>
@@ -120,11 +129,76 @@ function category_currency_converter_settings_page() {
             $selected_currency = get_option( 'category_currency_converter_currency', 'USD' );
             $currencies = array( 'USD', 'EUR', 'GBP' );
             ?>
-            <select name="category_currency_converter_currency">
+            <select id="category_currency_converter_currency" name="category_currency_converter_currency">
                <?php foreach ( $currencies as $currency ) : ?>
                      <option value="<?php echo esc_attr( $currency ); ?>" <?php selected( $selected_currency, $currency ); ?>><?php echo esc_html( $currency ); ?></option>
                <?php endforeach; ?>
             </select>
+
+            <input type="hidden" id="category_currency_converter_currency_categories" name="category_currency_converter_currency_categories" value="<?php echo esc_attr( wp_json_encode( $currency_categories ) ); ?>">
+
+            <script>
+              (function () {
+                const currencies = ['USD', 'EUR', 'GBP'];
+                const currencySelect = document.getElementById('category_currency_converter_currency');
+                const hiddenInput = document.getElementById('category_currency_converter_currency_categories');
+                const checkboxes = Array.from(document.querySelectorAll('.ccc-category-checkbox'));
+
+                let state = {};
+                try {
+                  state = JSON.parse(hiddenInput.value || '{}');
+                } catch (e) {
+                  state = {};
+                }
+
+                currencies.forEach((currency) => {
+                  if (!Array.isArray(state[currency])) {
+                    state[currency] = [];
+                  }
+                });
+
+                function normalizeAndPersist() {
+                  currencies.forEach((currency) => {
+                    state[currency] = Array.from(new Set((state[currency] || []).map((id) => parseInt(id, 10)).filter((id) => !Number.isNaN(id) && id > 0)));
+                  });
+
+                  hiddenInput.value = JSON.stringify(state);
+                }
+
+                function renderForCurrency(currency) {
+                  const selected = new Set((state[currency] || []).map((id) => parseInt(id, 10)));
+                  checkboxes.forEach((checkbox) => {
+                    checkbox.checked = selected.has(parseInt(checkbox.value, 10));
+                  });
+                }
+
+                function saveCurrentCurrencySelection() {
+                  const selectedCurrency = currencySelect.value;
+                  state[selectedCurrency] = checkboxes
+                    .filter((checkbox) => checkbox.checked)
+                    .map((checkbox) => parseInt(checkbox.value, 10));
+
+                  normalizeAndPersist();
+                }
+
+                checkboxes.forEach((checkbox) => {
+                  checkbox.addEventListener('change', saveCurrentCurrencySelection);
+                });
+
+                currencySelect.addEventListener('change', () => {
+                  saveCurrentCurrencySelection();
+                  renderForCurrency(currencySelect.value);
+                });
+
+                normalizeAndPersist();
+                renderForCurrency(currencySelect.value);
+
+                const form = currencySelect.closest('form');
+                if (form) {
+                  form.addEventListener('submit', saveCurrentCurrencySelection);
+                }
+              })();
+            </script>
 
             <?php submit_button(); ?>
          </form>
@@ -135,10 +209,10 @@ function category_currency_converter_settings_page() {
    function category_currency_converter_register_settings() {
       register_setting(
          'category_currency_converter_settings_group',
-         'category_currency_converter_selected_categories',
+         'category_currency_converter_currency_categories',
       array(
-         'type' => 'array',
-         'sanitize_callback' => 'category_currency_converter_sanitize_selected_categories'
+         'type' => 'string',
+         'sanitize_callback' => 'category_currency_converter_sanitize_currency_categories'
       )
       );
 
@@ -153,15 +227,79 @@ function category_currency_converter_settings_page() {
    }
    add_action( 'admin_init', 'category_currency_converter_register_settings' );
 
-   // Функция для очистки данных выбранных категорий
-   function category_currency_converter_sanitize_selected_categories( $input ) {
-      $output = array();
-      if ( is_array( $input ) ) {
-         foreach ( $input as $category_id ) {
-            $output[] = absint( $category_id );
+   function category_currency_converter_get_currency_categories() {
+      $saved = get_option( 'category_currency_converter_currency_categories', '' );
+      $parsed = json_decode( is_string( $saved ) ? $saved : '', true );
+
+      if ( ! is_array( $parsed ) ) {
+         $parsed = array();
+      }
+
+      $result = array(
+         'USD' => array(),
+         'EUR' => array(),
+         'GBP' => array(),
+      );
+
+      foreach ( $result as $currency => $unused ) {
+         if ( isset( $parsed[ $currency ] ) && is_array( $parsed[ $currency ] ) ) {
+            $result[ $currency ] = array_values(
+               array_unique(
+                  array_filter(
+                     array_map( 'absint', $parsed[ $currency ] )
+                  )
+               )
+            );
          }
       }
-      return $output;
+
+      if ( empty( $result['USD'] ) ) {
+         $legacy_selected = get_option( 'category_currency_converter_selected_categories', array() );
+         if ( is_array( $legacy_selected ) ) {
+            $result['USD'] = array_values(
+               array_unique(
+                  array_filter(
+                     array_map( 'absint', $legacy_selected )
+                  )
+               )
+            );
+         }
+      }
+
+      return $result;
+   }
+
+   function category_currency_converter_sanitize_currency_categories( $input ) {
+      $parsed = json_decode( is_string( $input ) ? $input : '', true );
+      if ( ! is_array( $parsed ) ) {
+         return wp_json_encode(
+            array(
+               'USD' => array(),
+               'EUR' => array(),
+               'GBP' => array(),
+            )
+         );
+      }
+
+      $output = array(
+         'USD' => array(),
+         'EUR' => array(),
+         'GBP' => array(),
+      );
+
+      foreach ( $output as $currency => $unused ) {
+         if ( isset( $parsed[ $currency ] ) && is_array( $parsed[ $currency ] ) ) {
+            $output[ $currency ] = array_values(
+               array_unique(
+                  array_filter(
+                     array_map( 'absint', $parsed[ $currency ] )
+                  )
+               )
+            );
+         }
+      }
+
+      return wp_json_encode( $output );
    }
 
    function category_currency_converter_sanitize_currency( $currency ) {
