@@ -27,31 +27,51 @@ function category_currency_converter_deactivate() {
 }
 
 function update_exchange_rate() {
-   $from_currency = get_option( 'category_currency_converter_currency', 'USD' );
-   $api_url = "https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?valcode={$from_currency}&json";
+   $currencies = array( 'USD', 'EUR', 'GBP' );
+   $exchange_rates = array();
 
-   $response = wp_remote_get(
-      $api_url,
-      array(
-         'timeout'   => 10,
-         'sslverify' => true,
-      )
-   );
+   foreach ( $currencies as $from_currency ) {
+      $api_url = "https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?valcode={$from_currency}&json";
 
-   if ( !is_wp_error( $response ) && wp_remote_retrieve_response_code( $response ) == 200 ) {
-      $data = json_decode( wp_remote_retrieve_body( $response ), true );
-   if ( isset( $data[0]['rate'] ) ) {
-      $exchange_rate = floatval( $data[0]['rate'] ); // Получение курса обмена
+      $response = wp_remote_get(
+         $api_url,
+         array(
+            'timeout'   => 10,
+            'sslverify' => true,
+         )
+      );
 
-      if ( $exchange_rate <= 0 ) {
-         return;
+      if ( is_wp_error( $response ) || 200 !== wp_remote_retrieve_response_code( $response ) ) {
+         continue;
       }
 
-      update_option( 'category_currency_converter_exchange_rate', $exchange_rate ); // Сохранение курса обмена
+      $data = json_decode( wp_remote_retrieve_body( $response ), true );
+      if ( isset( $data[0]['rate'] ) ) {
+         $exchange_rate = floatval( $data[0]['rate'] );
+
+         if ( $exchange_rate > 0 ) {
+            $exchange_rates[ $from_currency ] = $exchange_rate;
+         }
+      }
    }
+
+   if ( ! empty( $exchange_rates ) ) {
+      update_option( 'category_currency_converter_exchange_rates', $exchange_rates );
+
+      $selected_currency = get_option( 'category_currency_converter_currency', 'USD' );
+      if ( isset( $exchange_rates[ $selected_currency ] ) ) {
+         update_option( 'category_currency_converter_exchange_rate', $exchange_rates[ $selected_currency ] );
+      }
    }
 }
 add_action( 'category_currency_converter_update_exchange_rate', 'update_exchange_rate' );
+
+function category_currency_converter_refresh_exchange_rates_on_settings_save( $old_value, $value ) {
+   if ( $old_value !== $value ) {
+      update_exchange_rate();
+   }
+}
+add_action( 'update_option_category_currency_converter_currency', 'category_currency_converter_refresh_exchange_rates_on_settings_save', 10, 2 );
 
 // обновять один раз в день
 function custom_cron_schedules( $schedules ) {
